@@ -1,0 +1,88 @@
+version: '3.8'
+
+services:
+  postgres-primary:
+    image: postgres:12
+    container_name: postgres-primary
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: primary_db
+    command: |
+      postgres 
+      -c wal_level=logical 
+      -c hot_standby=on 
+      -c max_wal_senders=10 
+      -c max_replication_slots=10 
+      -c hot_standby_feedback=on
+    ports:
+      - "5432:5432"
+    volumes:
+      - primary_data:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d # Preload SQL scripts
+    networks:
+      - flink-network
+
+  postgres-replica:
+    image: postgres:12
+    container_name: postgres-replica
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: replica_db
+      POSTGRES_HOST_AUTH_METHOD: trust
+    depends_on:
+      - postgres-primary
+    ports:
+      - "5433:5432"
+    volumes:
+      - replica_data:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d # Preload SQL scripts
+    command: >
+      postgres -c wal_level=replica
+               -c max_wal_senders=5
+               -c hot_standby=on
+    networks:
+      - flink-network
+
+  flink:
+    image: flink:1.16.2
+    container_name: flink
+    ports:
+      - "8081:8081" # Flink WebUI
+    volumes:
+      - ./flink-plugins:/opt/flink/lib2 # Add plugins like postgres-cdc connector
+    command: jobmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink  
+    depends_on:
+      - postgres-primary
+      - postgres-replica
+    networks:
+      - flink-network
+
+  taskmanager:
+    image: flink:1.16.2
+    container_name: flink-taskmanager
+    depends_on:
+      - flink
+    command: >
+      bash -c "bin/taskmanager.sh start-foreground"
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink
+        taskmanager.numberOfTaskSlots: 2
+    networks:
+      - flink-network
+
+volumes:
+  primary_data:
+  replica_data:
+
+networks:
+  flink-network:
+    driver: bridge
+
